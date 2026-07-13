@@ -19,6 +19,13 @@ interface ChainLabProps {
   initialChain?: ModuleId[];
   /** name of a saved chain preset to load on mount (Projects nav) */
   initialPreset?: string;
+  /**
+   * Source video shared with the dashboard's Nodal Composition. When set,
+   * the lab loads this exact source; picking a new video here lifts it back
+   * up through onSourcePicked so the dashboard preview + INPUT node follow.
+   */
+  initialSource?: { url: string; name: string } | null;
+  onSourcePicked?: (file: File) => void;
 }
 
 // default rack order: trackers first, lens/grade passes last
@@ -51,7 +58,7 @@ const readPresets = (): ChainPreset[] => {
  * one WebGL context, all five effects composed in series on the same
  * frame. This is the capability the iframe architecture cannot provide.
  */
-export default function ChainLab({ isDayMode, onBack, initialChain, initialPreset }: ChainLabProps) {
+export default function ChainLab({ isDayMode, onBack, initialChain, initialPreset, initialSource, onSourcePicked }: ChainLabProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const audioFileRef = useRef<HTMLInputElement | null>(null);
@@ -128,6 +135,19 @@ export default function ChainLab({ isDayMode, onBack, initialChain, initialPrese
       engineRef.current = null;
     };
   }, []);
+
+  // Shared source: load the dashboard's chosen video (single load path — the
+  // Video button lifts its pick up to the shell, which flows back here).
+  const loadedUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    const engine = engineRef.current;
+    const url = initialSource?.url;
+    if (!engine || !url || loadedUrlRef.current === url) return;
+    loadedUrlRef.current = url;
+    engine.loadVideoUrl(url)
+      .then(() => { setSourceKind('video'); setError(null); })
+      .catch((e) => setError((e as Error).message));
+  }, [initialSource?.url]);
 
   // low-rate UI mirror of the live signals (meters + modulated readouts)
   useEffect(() => {
@@ -297,7 +317,14 @@ export default function ChainLab({ isDayMode, onBack, initialChain, initialPrese
   };
 
   const loadVideo = async (file: File | null) => {
-    if (!file || !engineRef.current) return;
+    if (!file) return;
+    // when embedded in the dashboard, hand the pick to the shell; it becomes
+    // the shared source and flows back through initialSource (single path)
+    if (onSourcePicked) {
+      onSourcePicked(file);
+      return;
+    }
+    if (!engineRef.current) return;
     try {
       await engineRef.current.loadVideoFile(file);
       setSourceKind('video');

@@ -987,7 +987,7 @@ export default function VfxCanvas({
       }
       resizeObserver.disconnect();
     };
-  }, [activeModule, modules, signalSource, isStreaming, micActive]);
+  }, [activeModule, modules, signalSource, isStreaming, micActive, isDayMode]);
 
   return (
     <div

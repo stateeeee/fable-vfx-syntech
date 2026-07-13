@@ -1,41 +1,32 @@
-import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Activity, 
-  Layers, 
-  Sliders, 
-  Settings, 
-  Zap, 
-  Radio, 
-  Cpu, 
-  Lock, 
-  Unlock, 
-  RefreshCw, 
-  Play, 
-  Square,
-  Volume2,
-  SlidersHorizontal,
-  Info,
-  Sparkle,
-  Send,
-  Bot,
-  Lightbulb,
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Layers,
+  Play,
+  RefreshCw,
   Sun,
-  Moon
+  Moon,
+  MoreHorizontal,
+  Search,
+  Cpu,
+  Home as HomeIcon,
+  Save as SaveIcon,
+  Folder as FolderIcon,
+  Sparkles as AiIcon,
+  ChevronRight,
 } from 'lucide-react';
 import { ModuleConfig, ModuleId, ActiveTab, SignalSource } from './types';
 import { EffectTelemetry, ParamSchema, ShellMessage } from './bridge/types';
 import { EFFECTS_REGISTRY, hasRealEffect } from './effects-registry';
 import VfxCanvas from './components/VfxCanvas';
-import DiagnosticsPanel from './components/DiagnosticsPanel';
 import EffectHost from './components/EffectHost';
 import ChainLab from './components/ChainLab';
 import AiDirector from './components/AiDirector';
+import NodalComposition, { CompEffect, EFFECT_META } from './components/NodalComposition';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { Home as HomeIcon, Save as SaveIcon, Folder as FolderIcon, Sparkles as AiIcon } from 'lucide-react';
 
 // explicit session snapshot for the SAVE nav action (decision #9: localStorage)
 const SESSION_KEY = 'syntech.session';
+const COMP_KEY = 'syntech.composition';
 interface SavedSession { activeModule?: ModuleId; isDayMode?: boolean; savedAt?: number }
 const readSession = (): SavedSession => {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) ?? '{}') ?? {}; } catch { return {}; }
@@ -80,28 +71,65 @@ export default function App() {
   // Ai Lab (native SynEngine): effects composed in series, phase 5 MVP
   const [chainOpen, setChainOpen] = useState(false);
 
-  // Signal chain built by linking hub nodes on the brain graph (phase 5):
-  // dragging hub A onto hub B appends the link; the chain persists per-browser
-  const [graphChain, setGraphChain] = useState<ModuleId[]>(() => {
+  // ── COMPOSITION STATE (shared by the Nodal Composition + the AI Lab) ──
+  // The effects present in the composition, each with its enabled flag.
+  // Detaching a node's connection port simply toggles enabled. The AI Lab
+  // opens with exactly this source + enabled chain (the Nodal Composition is
+  // the dashboard shortcut into it).
+  const [compEffects, setCompEffects] = useState<CompEffect[]>(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem('syntech.graphChain') ?? '[]');
-      return Array.isArray(saved) ? saved.filter((id) => id in EFFECTS_REGISTRY) : [];
-    } catch {
-      return [];
-    }
+      const saved = JSON.parse(localStorage.getItem(COMP_KEY) ?? 'null');
+      if (Array.isArray(saved)) {
+        const cleaned = saved.filter((e) => e && typeof e.id === 'string' && e.id in EFFECTS_REGISTRY)
+          .map((e) => ({ id: e.id as ModuleId, enabled: !!e.enabled }));
+        if (cleaned.length) return cleaned;
+      }
+    } catch { /* ignore */ }
+    return [{ id: 'blob_tracker', enabled: true }, { id: 'analog', enabled: true }];
   });
   useEffect(() => {
-    try { localStorage.setItem('syntech.graphChain', JSON.stringify(graphChain)); } catch { /* private mode */ }
-  }, [graphChain]);
+    try { localStorage.setItem(COMP_KEY, JSON.stringify(compEffects)); } catch { /* private mode */ }
+  }, [compEffects]);
 
+  // the enabled chain (in order) — what the AI Lab / brain graph consume
+  const graphChain: ModuleId[] = compEffects.filter((e) => e.enabled).map((e) => e.id);
+
+  const toggleCompEffect = (id: ModuleId) =>
+    setCompEffects((prev) => prev.map((e) => (e.id === id ? { ...e, enabled: !e.enabled } : e)));
+  const addCompEffect = (id: ModuleId) =>
+    setCompEffects((prev) => (prev.some((e) => e.id === id) ? prev.map((e) => (e.id === id ? { ...e, enabled: true } : e)) : [...prev, { id, enabled: true }]));
+  const removeCompEffect = (id: ModuleId) =>
+    setCompEffects((prev) => prev.filter((e) => e.id !== id));
+
+  // Linking two hubs on the brain graph adds both to the composition (enabled)
   const handleChainLink = (from: ModuleId, to: ModuleId) => {
     if (from === to) return;
-    setGraphChain((prev) => {
-      // extend the chain when the drag starts from its tail; otherwise start over
-      if (prev.length && prev[prev.length - 1] === from && !prev.includes(to)) return [...prev, to];
-      return [from, to];
+    setCompEffects((prev) => {
+      let next = prev.slice();
+      const ensure = (id: ModuleId) => {
+        if (!next.some((e) => e.id === id)) next.push({ id, enabled: true });
+        else next = next.map((e) => (e.id === id ? { ...e, enabled: true } : e));
+      };
+      ensure(from);
+      ensure(to);
+      return next;
     });
   };
+  const clearChain = () => setCompEffects((prev) => prev.map((e) => ({ ...e, enabled: false })));
+
+  // ── SHARED SOURCE VIDEO (video + audio): the INPUT node ──
+  const [compSource, setCompSource] = useState<{ url: string; name: string } | null>(null);
+  const sourceInputRef = useRef<HTMLInputElement | null>(null);
+  const pickSource = () => sourceInputRef.current?.click();
+  const onSourceFile = (file: File | null) => {
+    if (!file) return;
+    setCompSource((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return { url: URL.createObjectURL(file), name: file.name };
+    });
+  };
+  useEffect(() => () => { if (compSource?.url) URL.revokeObjectURL(compSource.url); }, []); // eslint-disable-line
+
   const [effectTelemetry, setEffectTelemetry] = useState<EffectTelemetry | null>(null);
 
   // Sender registered by the open effect's bridge (param:set / preset:apply)
@@ -122,9 +150,10 @@ export default function App() {
     effectSendRef.current = null;
   };
 
+  const openLab = () => { handleEffectClose(); setChainOpen(true); };
+
   // The effect declared its real ParamSchema: swap the module's placeholder
   // parameters for the real ones so Gemini and the shell operate on truth.
-  // Booleans are mapped to 0/1 sliders so AI presets can flip them too.
   const handleEffectParams = (effectId: ModuleId, params: ParamSchema[]) => {
     if (params.length === 0) return;
     setModules((prev) =>
@@ -160,13 +189,11 @@ export default function App() {
   // Gemini Intelligence custom states
   const [activeGeminiMode, setActiveGeminiMode] = useState<'art_director' | 'agent' | 'optimizer' | null>(null);
   const [geminiPrompt, setGeminiPrompt] = useState('');
-  const [hoveredMode, setHoveredMode] = useState<'art_director' | 'agent' | 'optimizer' | null>(null);
   const [geminiResponse, setGeminiResponse] = useState<string | null>(null);
   const [isProcessingGemini, setIsProcessingGemini] = useState(false);
   const [suggestedPreset, setSuggestedPreset] = useState<any | null>(null);
 
-  // Apply a parameter preset suggested by Gemini AI: update the shell state
-  // and forward it through the bridge so the open effect changes for real
+  // Apply a parameter preset suggested by Gemini AI
   const handleApplyPreset = (preset: any) => {
     if (!preset) return;
     setModules((prev) =>
@@ -176,16 +203,11 @@ export default function App() {
           let updated = false;
           for (const key of Object.keys(preset)) {
             if (updatedParameters[key]) {
-              updatedParameters[key] = {
-                ...updatedParameters[key],
-                value: Number(preset[key])
-              };
+              updatedParameters[key] = { ...updatedParameters[key], value: Number(preset[key]) };
               updated = true;
             }
           }
-          if (updated) {
-            return { ...m, parameters: updatedParameters };
-          }
+          if (updated) return { ...m, parameters: updatedParameters };
         }
         return m;
       })
@@ -193,96 +215,13 @@ export default function App() {
     effectSendRef.current?.({ type: 'syntech:preset:apply', payload: { params: preset } });
   };
 
-  const handleSendToGemini = async () => {
-    if (isProcessingGemini) return;
-    const promptToSend = geminiPrompt.trim();
-    
-    if (!activeGeminiMode) {
-      setGeminiResponse("Please select a Gemini pathway (Art Director, Agent, or AI Optimizer) first.");
-      return;
-    }
-
-    setIsProcessingGemini(true);
-    setGeminiResponse(null);
-    setSuggestedPreset(null);
-
-    try {
-      if (activeGeminiMode === 'art_director') {
-        const response = await fetch('/api/gemini/analyze', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            activeModule,
-            parameters: currentModule.parameters,
-            prompt: promptToSend
-          })
-        });
-        const data = await response.json();
-        if (data.analysis) {
-          setGeminiResponse(data.analysis + (data.isFallback ? " (Local Backup)" : ""));
-        } else {
-          setGeminiResponse("No analysis returned from the cognitive model.");
-        }
-      } else if (activeGeminiMode === 'optimizer') {
-        const response = await fetch('/api/gemini/optimize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            activeModule,
-            parameters: currentModule.parameters,
-            prompt: promptToSend
-          })
-        });
-        const data = await response.json();
-        if (data.preset) {
-          setSuggestedPreset(data.preset);
-          handleApplyPreset(data.preset);
-          if (data.isFallback) {
-            setGeminiResponse("Optimization system offline. Loaded mathematical local optimal presets instead.");
-          } else {
-            setGeminiResponse(`Optimized parameter map calculated and applied automatically for module "${currentModule.name}".`);
-          }
-        } else {
-          setGeminiResponse("Optimization model was unable to generate a valid parameter map.");
-        }
-      } else if (activeGeminiMode === 'agent') {
-        // Chatbot / agent pathway
-        const msg = promptToSend || "Analyze current VFX configuration and suggest a dramatic preset.";
-        const response = await fetch('/api/gemini/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: msg,
-            history: [],
-            currentConfig: {
-              activeModule,
-              parameters: currentModule.parameters
-            }
-          })
-        });
-        const data = await response.json();
-        if (response.ok) {
-          setGeminiResponse(data.reply);
-          if (data.preset) {
-            setSuggestedPreset(data.preset);
-          }
-        } else {
-          setGeminiResponse(`Agent node reported an error: ${data.error || 'Server rejected request'}`);
-        }
-      }
-      setGeminiPrompt('');
-    } catch (err: any) {
-      console.error("Gemini Core execution failed:", err);
-      setGeminiResponse(`Neural link interrupted: ${err.message || 'connection failure'}`);
-    } finally {
-      setIsProcessingGemini(false);
-    }
-  };
-
   // Dynamic ticking metrics
-  const [frameCount, setFrameCount] = useState(0);
-  const [uptimeSeconds, setUptimeSeconds] = useState(0); // starts at zero as a real-time stopwatch
+  const [frameCount, setFrameCount] = useState(84491820);
+  const [uptimeSeconds, setUptimeSeconds] = useState(15132);
   const [simulatedLatency, setSimulatedLatency] = useState(1.2);
+  const [fpsDisplay, setFpsDisplay] = useState(120);
+  const frameCountRef = useRef(frameCount);
+  frameCountRef.current = frameCount;
 
   // Modules setup with their reactive parameter configurations
   const [modules, setModules] = useState<ModuleConfig[]>([
@@ -349,17 +288,13 @@ export default function App() {
   useEffect(() => {
     let frameTimer: number;
     let clockTimer: number;
-
     if (isStreaming) {
-      // Tick frames up rapidly at ~60fps
       frameTimer = window.setInterval(() => {
         setFrameCount((prev) => prev + Math.floor(Math.random() * 2) + 1);
       }, 16);
-
-      // Tick uptime clock
       clockTimer = window.setInterval(() => {
         setUptimeSeconds((prev) => prev + 1);
-        // Vary latency slightly
+        setFpsDisplay(116 + Math.floor(Math.random() * 8));
         setSimulatedLatency((prev) => {
           const jitter = (Math.random() - 0.5) * 0.12;
           const base = bufferSize === 4896 ? 1.2 : bufferSize === 2048 ? 0.6 : 2.4;
@@ -367,391 +302,439 @@ export default function App() {
         });
       }, 1000);
     }
-
     return () => {
       clearInterval(frameTimer);
       clearInterval(clockTimer);
     };
   }, [isStreaming, bufferSize]);
 
-  // Format uptime (seconds -> hh:mm:ss)
   const formatUptime = (totalSecs: number) => {
     const hrs = Math.floor(totalSecs / 3600);
     const mins = Math.floor((totalSecs % 3600) / 60);
     const secs = totalSecs % 60;
-    return [
-      hrs.toString().padStart(2, '0'),
-      mins.toString().padStart(2, '0'),
-      secs.toString().padStart(2, '0')
-    ].join(':');
+    return [hrs, mins, secs].map((n) => n.toString().padStart(2, '0')).join(':');
   };
+  const formatFrames = (frames: number) => frames.toLocaleString('en-US');
 
-  // Format frame count with comma separators
-  const formatFrames = (frames: number) => {
-    return frames.toLocaleString('en-US');
-  };
-
-  // Toggle active/standby module state
   const toggleModuleStatus = (id: ModuleId, e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevent selecting the module just by clicking toggle
+    e.stopPropagation();
     setModules((prev) =>
-      prev.map((m) => {
-        if (m.id === id) {
-          const nextStatus = m.status === 'ACTIVE' ? 'STANDBY' : 'ACTIVE';
-          return { ...m, status: nextStatus };
-        }
-        return m;
-      })
+      prev.map((m) => (m.id === id ? { ...m, status: m.status === 'ACTIVE' ? 'STANDBY' : 'ACTIVE' } : m))
     );
   };
 
-  // Change individual parameter slider value
   const handleParameterChange = (moduleId: ModuleId, paramKey: string, newValue: number) => {
     setModules((prev) =>
-      prev.map((m) => {
-        if (m.id === moduleId) {
-          return {
-            ...m,
-            parameters: {
-              ...m.parameters,
-              [paramKey]: {
-                ...m.parameters[paramKey],
-                value: newValue,
-              },
-            },
-          };
-        }
-        return m;
-      })
+      prev.map((m) =>
+        m.id === moduleId
+          ? { ...m, parameters: { ...m.parameters, [paramKey]: { ...m.parameters[paramKey], value: newValue } } }
+          : m
+      )
     );
   };
 
-  // Quick preset selections for buffer size
-  const handleBufferSizeChange = (size: number) => {
-    setBufferSize(size);
-  };
+  const handleBufferSizeChange = (size: number) => setBufferSize(size);
+
+  const isHome = !chainOpen && !openEffectId;
+
+  // ── left-sidebar navigation (the real commands, re-skinned per reference) ──
+  const navItems: Array<{ key: string; label: string; Icon: any; active: boolean; onClick: () => void; title?: string }> = [
+    { key: 'home', label: 'Home', Icon: HomeIcon, active: isHome, onClick: () => { setChainOpen(false); handleEffectClose(); } },
+    { key: 'save', label: savedFlash ? 'Saved' : 'Save', Icon: SaveIcon, active: savedFlash, onClick: handleSaveSession, title: 'Save the current session (module, theme) to this browser' },
+    { key: 'projects', label: 'Projects', Icon: FolderIcon, active: projectsOpen, onClick: () => setProjectsOpen(true), title: 'Saved effect chains' },
+    { key: 'ailab', label: 'AI Lab', Icon: AiIcon, active: chainOpen, onClick: openLab },
+  ];
+
+  const outputRes = compSource ? '1920x1080' : '1920x1080';
 
   return (
-    <div className={`h-screen w-screen transition-colors duration-300 ${isDayMode ? 'bg-[#fcfbf9] text-neutral-900' : 'bg-[#050505] text-white'} flex font-sans overflow-hidden`}>
-      
-      {/* LEFT SIDEBAR */}
-      <nav className={`w-[90px] shrink-0 flex flex-col items-center py-6 border-r transition-colors duration-300 ${isDayMode ? 'border-gold-500/10 bg-[#f7f5f0]' : 'border-[#111] bg-[#080808]'} gap-8 z-20`}>
-        <div className="w-10 h-10 border-2 border-gold-500 rotate-45 flex items-center justify-center shrink-0 mb-4">
-          <span className="text-gold-500 font-bold -rotate-45 text-xs">VS</span>
+    <div className={`h-screen w-screen transition-colors duration-300 ${isDayMode ? 'bg-[#fcfbf9] text-neutral-900' : 'text-white space-vignette'} flex flex-col font-sans overflow-hidden`}>
+
+      {/* hidden source picker (shared INPUT) */}
+      <input
+        ref={sourceInputRef}
+        type="file"
+        accept="video/*"
+        data-testid="source-file"
+        className="hidden"
+        onChange={(e) => { onSourceFile(e.target.files?.[0] ?? null); e.currentTarget.value = ''; }}
+      />
+
+      {/* ═══════════════ TOP BAR ═══════════════ */}
+      <header className={`h-12 shrink-0 flex items-center justify-between px-4 border-b relative z-30 ${isDayMode ? 'border-neutral-200 bg-[#f7f5f0]' : 'border-ink-700/60 bg-ink-950'}`}>
+        <div className="flex items-center gap-3 w-56">
+          <span className={`font-mono text-[10px] tracking-[0.2em] uppercase ${isDayMode ? 'text-neutral-500' : 'text-neutral-500'}`}>
+            {chainOpen ? 'AI Lab' : openEffectId ? currentModule.name : 'Composer'}
+          </span>
         </div>
-        
-        <ul className={`flex flex-col gap-8 w-full items-center text-[9px] uppercase tracking-widest font-medium transition-colors ${isDayMode ? 'text-neutral-500' : 'text-neutral-500'}`}>
-          <li
-            className={`flex flex-col items-center gap-2 cursor-pointer transition-colors ${!chainOpen && !openEffectId ? 'text-gold-500' : isDayMode ? 'hover:text-black' : 'hover:text-white'}`}
-            onClick={() => { setChainOpen(false); handleEffectClose(); }}
-          >
-            <div className={`p-2 rounded-xl transition-colors ${!chainOpen && !openEffectId ? (isDayMode ? 'bg-gold-500/10' : 'bg-gold-500/10') : ''}`}>
-               <HomeIcon className="w-5 h-5" />
-            </div>
-            <span>Home</span>
-          </li>
-          <li
-            className={`flex flex-col items-center gap-2 cursor-pointer transition-colors ${savedFlash ? 'text-gold-500' : isDayMode ? 'hover:text-black' : 'hover:text-white'}`}
-            onClick={handleSaveSession}
-            title="Save the current session (module, theme) to this browser"
-          >
-            <div className={`p-2 rounded-xl transition-colors ${savedFlash ? 'bg-gold-500/10' : ''}`}>
-               <SaveIcon className="w-5 h-5" />
-            </div>
-            <span>{savedFlash ? 'Saved' : 'Save'}</span>
-          </li>
-          <li
-            className={`flex flex-col items-center gap-2 cursor-pointer transition-colors ${projectsOpen ? 'text-gold-500' : isDayMode ? 'hover:text-black' : 'hover:text-white'}`}
-            onClick={() => setProjectsOpen(true)}
-            title="Saved effect chains"
-          >
-            <div className={`p-2 rounded-xl transition-colors ${projectsOpen ? 'bg-gold-500/10' : ''}`}>
-               <FolderIcon className="w-5 h-5" />
-            </div>
-            <span>Projects</span>
-          </li>
-          <li
-            className={`flex flex-col items-center gap-2 cursor-pointer transition-colors ${chainOpen ? 'text-gold-500' : isDayMode ? 'hover:text-black' : 'hover:text-white'}`}
-            onClick={() => { handleEffectClose(); setChainOpen(true); }}
-          >
-            <div className={`p-2 rounded-xl transition-colors ${chainOpen ? 'bg-gold-500/10' : ''}`}>
-               <AiIcon className="w-5 h-5" />
-            </div>
-            <span>Ai Lab</span>
-          </li>
-        </ul>
-      </nav>
 
-      {/* MAIN CONTENT AREA */}
-      <div className="flex-1 flex flex-col p-4 md:p-6 gap-4 md:gap-6 overflow-hidden relative">
-        
-        {/* PROJECTS MODAL */}
-        {projectsOpen && (
-          <div
-            className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-            data-testid="projects-modal"
-            onClick={() => setProjectsOpen(false)}
-          >
-            <div
-              className={`w-full max-w-md mx-4 rounded-xl border p-5 space-y-3 shadow-2xl ${isDayMode ? 'bg-[#fcfbf9] border-gold-500/40 text-neutral-900' : 'bg-[#0a0a0a] border-gold-500/30 text-white'}`}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-[11px] font-extrabold tracking-[0.25em] text-gold-500 uppercase">Projects — Saved chains</span>
-                <button
-                  onClick={() => setProjectsOpen(false)}
-                  className="font-mono text-[11px] text-neutral-500 hover:text-gold-500 cursor-pointer"
-                >
-                  [CLOSE]
-                </button>
-              </div>
-              {savedChains().length === 0 ? (
-                <p className={`font-mono text-[10px] leading-relaxed ${isDayMode ? 'text-neutral-500' : 'text-neutral-400'}`}>
-                  No saved chains yet. Build one in the Ai Lab (or by linking nodes on the
-                  brain graph) and save it as a preset — it will appear here.
-                </p>
-              ) : (
-                <ul className="space-y-2 mt-4 max-h-[60vh] overflow-y-auto pr-2">
-                  {savedChains().map((c) => (
-                    <li
-                      key={c.savedAt}
-                      className={`flex items-center justify-between p-3 rounded border cursor-pointer group ${isDayMode ? 'border-neutral-200 hover:border-gold-500 hover:bg-gold-500/5' : 'border-[#222] hover:border-gold-500/50 hover:bg-gold-500/10'}`}
-                      onClick={() => {
-                        setChainPresetToOpen(c.name);
-                        setChainOpen(true);
-                        setProjectsOpen(false);
-                      }}
-                    >
-                      <div className="flex flex-col">
-                        <span className="font-bold text-sm tracking-wide">{c.name}</span>
-                        <span className="font-mono text-[9px] text-neutral-500">
-                          {new Date(c.savedAt).toLocaleString()} • {c.enabled.length} modules
-                        </span>
-                      </div>
-                      <div className={`p-1.5 rounded opacity-0 group-hover:opacity-100 transition-opacity ${isDayMode ? 'bg-neutral-200 text-neutral-700' : 'bg-[#333] text-white'}`}>
-                        <Play className="w-3 h-3" />
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+        {/* centered wordmark */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 pointer-events-none">
+          <span className="font-display text-sm font-semibold tracking-tight">VFX <span className="text-gold-500">Syntech</span></span>
+        </div>
+
+        <div className="flex items-center gap-2.5 justify-end">
+          {/* FPS pill */}
+          <div className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[10px] ${isDayMode ? 'bg-white border border-neutral-200 text-neutral-600' : 'bg-ink-850 border border-ink-700/70 text-neutral-300'}`}>
+            <b className="text-gold-500">{fpsDisplay}</b> FPS
           </div>
-        )}
-
-
-        <PanelGroup direction="horizontal" autoSaveId="syntech-main-horiz" className="flex-1 flex gap-4 md:gap-6 overflow-hidden">
-          
-          {/* LEFT & CENTER COLUMN */}
-          <Panel defaultSize={75} minSize={30} className="flex flex-col overflow-hidden">
-            <PanelGroup direction="vertical" autoSaveId="syntech-main-vert" className="flex flex-col gap-4 md:gap-6">
-              {/* TOP AREA: Brain Graph / Ai Lab / Effect */}
-              <Panel defaultSize={65} minSize={20}>
-                <div className={`w-full h-full relative rounded-2xl border ${isDayMode ? 'border-neutral-200 bg-white' : 'border-[#1a1a1a] bg-[#050505]'} overflow-hidden flex flex-col shadow-lg`}>
-                  
-                  {chainOpen ? (
-                    <ChainLab
-                      isDayMode={isDayMode}
-                      onBack={() => setChainOpen(false)}
-                      initialChain={graphChain.length > 0 ? graphChain : undefined}
-                      initialPreset={chainPresetToOpen || undefined}
-                    />
-                  ) : openEffectId ? (
-                    <EffectHost
-                      module={modules.find((m) => m.id === openEffectId) || currentModule}
-                      iframeSrc={EFFECTS_REGISTRY[openEffectId].iframeSrc}
-                      isDayMode={isDayMode}
-                      onBack={handleEffectClose}
-                      onTelemetry={setEffectTelemetry}
-                      onParams={(params) => handleEffectParams(openEffectId, params)}
-                      onSendReady={(send) => { effectSendRef.current = send; }}
-                      onOpenAi={() => setIsAiDrawerOpen(true)}
-                    />
-                  ) : (
-                    <>
-                      <div className="absolute top-10 left-10 z-10 pointer-events-none">
-                        <h1 className="text-6xl md:text-8xl font-bold tracking-tighter text-white leading-none drop-shadow-2xl">
-                          VFX
-                        </h1>
-                        <h1 className="text-6xl md:text-8xl font-bold tracking-tighter bg-gradient-to-r from-[#ffe5a1] via-[#dca34b] to-[#7b51b7] text-transparent bg-clip-text leading-tight drop-shadow-2xl">
-                          SYNTECH
-                        </h1>
-                        <p className="mt-4 text-[11px] md:text-sm tracking-[0.2em] font-medium text-neutral-200 drop-shadow-md">
-                          AI-Powered. Node-Based. Limitless.
-                        </p>
-                      </div>
-                      
-                      <VfxCanvas
-                        modules={modules}
-                        activeModule={activeModule}
-                        setActiveModule={setActiveModule}
-                        onModuleOpen={handleModuleOpen}
-                        signalSource={signalSource}
-                        isDayMode={isDayMode}
-                        isStreaming={isStreaming}
-                        onChainLink={(from, to) => { handleChainLink(from, to); }}
-                        onChainOpen={() => { handleEffectClose(); setChainOpen(true); }}
-                        chain={graphChain}
-                      />
-                    </>
-                  )}
-                </div>
-              </Panel>
-
-              <PanelResizeHandle className="h-4 flex items-center justify-center cursor-row-resize group relative z-10 shrink-0">
-                <div className={`w-12 h-1.5 rounded-full transition-colors ${isDayMode ? 'bg-neutral-300 group-hover:bg-gold-500' : 'bg-[#333] group-hover:bg-gold-500'}`} />
-              </PanelResizeHandle>
-
-              {/* BOTTOM AREA: Nodal Comp + AI Director */}
-              <Panel defaultSize={35} minSize={15}>
-                <PanelGroup direction="horizontal" autoSaveId="syntech-bottom-horiz" className="flex gap-4 md:gap-6">
-                  {/* Nodal Composition */}
-                  <Panel defaultSize={55} minSize={20}>
-                    <div className={`w-full h-full rounded-2xl border ${isDayMode ? 'border-neutral-200 bg-[#fbfaf7]' : 'border-[#1a1a1a] bg-[#0a0a0a]'} flex items-center justify-center relative shadow-inner overflow-hidden`}>
-                      <div className="absolute top-4 left-5 flex items-center justify-between w-[calc(100%-40px)]">
-                        <span className="font-mono text-[10px] tracking-[0.25em] text-gold-500 uppercase font-bold">Nodal Composition</span>
-                        <div className="flex items-center gap-4 text-[9px] font-mono text-neutral-500">
-                          <span>Q 100% v</span>
-                          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded border border-neutral-700 flex items-center justify-center">+</span> Add Node</span>
-                        </div>
-                      </div>
-                      <span className="font-mono text-xs tracking-widest text-neutral-600 uppercase font-bold animate-pulse">
-                        Nodal Composition Loading...
-                      </span>
-                    </div>
-                  </Panel>
-
-                  <PanelResizeHandle className="w-4 flex items-center justify-center cursor-col-resize group shrink-0">
-                    <div className={`w-1.5 h-12 rounded-full transition-colors ${isDayMode ? 'bg-neutral-300 group-hover:bg-gold-500' : 'bg-[#333] group-hover:bg-gold-500'}`} />
-                  </PanelResizeHandle>
-                  
-                  {/* AI Director */}
-                  <Panel defaultSize={45} minSize={20}>
-                    <div className={`w-full h-full rounded-2xl border ${isDayMode ? 'border-neutral-200 bg-white' : 'border-[#1a1a1a] bg-[#0a0a0a]'} flex flex-col relative shadow-lg overflow-hidden`}>
-                      <AiDirector 
-                        isDayMode={isDayMode}
-                        currentConfig={{
-                          activeModule,
-                          signalSource,
-                          bufferSize,
-                          parameters: modules.find((m) => m.id === activeModule)?.parameters || {},
-                        }}
-                        onApplyPreset={(preset) => effectSendRef.current?.({ type: 'syntech:preset:apply', payload: { params: preset } })}
-                      />
-                    </div>
-                  </Panel>
-                </PanelGroup>
-              </Panel>
-
-            </PanelGroup>
-          </Panel>
-          
-          <PanelResizeHandle className="w-4 md:w-6 flex items-center justify-center cursor-col-resize group shrink-0">
-             <div className={`w-1.5 h-12 rounded-full transition-colors ${isDayMode ? 'bg-neutral-300 group-hover:bg-gold-500' : 'bg-[#333] group-hover:bg-gold-500'}`} />
-          </PanelResizeHandle>
-
-          {/* RIGHT SIDEBAR: Effects Library */}
-          <Panel defaultSize={25} minSize={15} maxSize={40}>
-            <div className={`w-full h-full rounded-2xl border flex flex-col overflow-hidden shadow-lg ${isDayMode ? 'border-neutral-200 bg-[#fbfaf7]' : 'border-[#1a1a1a] bg-[#080808]'}`}>
-               <div className="p-5 border-b border-white/5 flex items-center justify-between shrink-0">
-                 <h2 className="font-mono text-[10px] tracking-[0.25em] text-gold-500 uppercase font-bold flex items-center gap-2">
-                   <Layers className="w-3 h-3" /> Effects Library
-                 </h2>
-                 <span className="text-[9px] font-mono text-neutral-500">05 Systems</span>
-               </div>
-               
-               {/* Search box placeholder */}
-               <div className="px-4 py-3 border-b border-white/5 shrink-0">
-                 <div className={`w-full ${isDayMode ? 'bg-black/5 border-neutral-200' : 'bg-black/40 border-white/10'} border rounded-lg p-2.5 flex items-center gap-2`}>
-                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-neutral-500"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                   <span className="text-[10px] font-mono text-neutral-600">Search systems...</span>
-                 </div>
-               </div>
-               
-               <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
-                  {modules.map((module, idx) => (
-                    <div
-                      key={module.id}
-                      onClick={() => handleModuleOpen(module.id)}
-                      className={`p-4 rounded-xl border cursor-pointer transition-all ${
-                        activeModule === module.id
-                          ? isDayMode
-                            ? 'border-gold-500/50 bg-gold-500/5 shadow-md'
-                            : 'border-gold-500/40 bg-gold-500/10 shadow-[0_0_15px_rgba(234,179,8,0.1)]'
-                          : isDayMode
-                          ? 'border-neutral-200 bg-white hover:border-gold-500/30'
-                          : 'border-[#222] bg-[#111] hover:border-gold-500/30'
-                      }`}
-                    >
-                      <div className="flex justify-between items-start mb-3">
-                        <span className="font-mono text-[8px] text-gold-500 uppercase tracking-widest">
-                          0{idx + 1} // {module.id.replace('_', ' ')}
-                        </span>
-                        <span
-                          className={`text-[8px] font-mono uppercase tracking-widest px-1.5 py-0.5 rounded ${
-                            hasRealEffect(module.id)
-                              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                              : 'bg-neutral-500/20 text-neutral-400 border border-neutral-500/30'
-                          }`}
-                        >
-                          {hasRealEffect(module.id) ? 'Active' : 'Standby'}
-                        </span>
-                      </div>
-                      <div className="flex gap-3">
-                        <div className="w-12 h-12 shrink-0 rounded bg-black/50 border border-white/5 overflow-hidden flex items-center justify-center">
-                           <div className={`w-full h-full bg-gradient-to-br ${module.id === 'blob_tracker' ? 'from-amber-500/20 to-orange-500/5' : module.id === 'analog' ? 'from-blue-500/20 to-purple-500/5' : 'from-pink-500/20 to-rose-500/5'}`}></div>
-                        </div>
-                        <div className="flex flex-col gap-1">
-                          <span className={`text-sm font-bold ${isDayMode ? 'text-neutral-900' : 'text-white'}`}>
-                            {module.name}
-                          </span>
-                          <p className={`text-[9px] leading-relaxed font-mono ${isDayMode ? 'text-neutral-500' : 'text-neutral-400'}`}>
-                            {module.description}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-               </div>
-               
-               <div className="p-4 border-t border-white/5 flex justify-center shrink-0">
-                 <button className="text-[10px] font-mono tracking-widest text-neutral-400 hover:text-white transition-colors flex items-center gap-2 cursor-pointer">
-                   Browse All Systems <span className="text-gold-500">→</span>
-                 </button>
-               </div>
-            </div>
-          </Panel>
-        </PanelGroup>
-
-        {/* MULTI-PARAMETER FOOTER STATUS BAR */}
-        <div className={`border-t py-2 px-6 flex items-center justify-between text-[9px] font-mono mt-auto gap-4 ${
-          isDayMode ? 'border-neutral-200 bg-[#f7f5f0] text-neutral-500' : 'border-white/5 bg-[#030303] text-neutral-400'
-        }`}>
-          {/* Left section: Live Streaming Indicator & Uptime Chronometer */}
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="uppercase tracking-[0.15em] font-bold text-neutral-400">
-                LIVE STREAMING
-              </span>
-            </div>
-            <div className="w-px h-2.5 bg-neutral-800"></div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-neutral-500">TIME:</span>
-              <span className="text-gold-500 font-bold tracking-wider">{formatUptime(uptimeSeconds)}</span>
-            </div>
-          </div>
-
-          {/* Right section: Brand / Created By State */}
-          <div className="text-right flex items-center gap-1">
-            <span className="text-neutral-500">VFX SYNTECH 2026</span>
-            <span className="text-neutral-600">//</span>
-            <span className="uppercase tracking-[0.2em] font-extrabold text-gold-500">
-              CREATED BY STATE
+          {/* GPU meter */}
+          <div className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[10px] ${isDayMode ? 'bg-white border border-neutral-200 text-neutral-500' : 'bg-ink-850 border border-ink-700/70 text-neutral-400'}`}>
+            <span>GPU</span>
+            <span className="flex items-end gap-[2px] h-3">
+              {[0, 1, 2, 3].map((i) => (
+                <span key={i} className="eq-bar w-[3px] bg-emerald-400 rounded-sm" style={{ height: '100%', animationDelay: `${i * 0.12}s` }} />
+              ))}
             </span>
           </div>
+          <button
+            type="button"
+            title={isStreaming ? 'Pause engine' : 'Resume engine'}
+            onClick={() => setIsStreaming((v) => !v)}
+            className={`p-1.5 rounded-md transition-colors cursor-pointer ${isDayMode ? 'hover:bg-neutral-200 text-neutral-500' : 'hover:bg-ink-800 text-neutral-400'} ${isStreaming ? '' : 'text-gold-500'}`}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isStreaming ? 'animate-spin [animation-duration:6s]' : ''}`} />
+          </button>
+          <button
+            type="button"
+            title="Toggle day / night"
+            onClick={() => setIsDayMode((v) => !v)}
+            className={`p-1.5 rounded-md transition-colors cursor-pointer ${isDayMode ? 'hover:bg-neutral-200 text-neutral-500' : 'hover:bg-ink-800 text-neutral-400'}`}
+          >
+            {isDayMode ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
+          </button>
+          <button
+            type="button"
+            data-testid="render-btn"
+            onClick={openLab}
+            title="Open the AI Lab to render"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-gold-500 text-black font-bold text-[11px] tracking-wide hover:bg-gold-400 transition-colors cursor-pointer"
+          >
+            Render <Play className="w-3 h-3 fill-black" />
+          </button>
+          <button
+            type="button"
+            title="Save session"
+            onClick={handleSaveSession}
+            className={`p-1.5 rounded-md transition-colors cursor-pointer ${isDayMode ? 'hover:bg-neutral-200 text-neutral-500' : 'hover:bg-ink-800 text-neutral-400'}`}
+          >
+            <MoreHorizontal className="w-4 h-4" />
+          </button>
         </div>
+      </header>
 
+      <div className="flex-1 flex overflow-hidden">
+        {/* ═══════════════ LEFT SIDEBAR ═══════════════ */}
+        <nav className={`w-[78px] shrink-0 flex flex-col items-center pt-5 pb-3 border-r transition-colors duration-300 ${isDayMode ? 'border-neutral-200 bg-[#f7f5f0]' : 'border-ink-700/60 bg-ink-950'} z-20`}>
+          <div className="w-11 h-11 border-2 border-gold-500 rotate-45 flex items-center justify-center shrink-0 mb-7 rounded-[10px] bg-gold-500/5 shadow-[0_0_16px_rgba(224,180,81,0.2)]">
+            <span className="text-gold-500 font-bold -rotate-45 text-xs tracking-wide">VS</span>
+          </div>
+
+          <ul className="flex flex-col gap-5 w-full items-center">
+            {navItems.map(({ key, label, Icon, active, onClick, title }) => (
+              <li key={key} className="w-full flex justify-center">
+                <button
+                  type="button"
+                  data-testid={`nav-${key}`}
+                  onClick={onClick}
+                  title={title}
+                  className={`group flex flex-col items-center gap-1.5 w-full cursor-pointer transition-colors ${active ? 'text-gold-500' : isDayMode ? 'text-neutral-500 hover:text-black' : 'text-neutral-500 hover:text-white'}`}
+                >
+                  <span className={`p-2 rounded-xl transition-colors ${active ? 'bg-gold-500/12 shadow-[0_0_12px_rgba(224,180,81,0.12)]' : 'group-hover:bg-white/5'}`}>
+                    <Icon className="w-[18px] h-[18px]" />
+                  </span>
+                  <span className="text-[8.5px] uppercase tracking-[0.12em] font-medium">{label}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          {/* status block */}
+          <div className={`mt-auto w-full px-2.5 pt-3 border-t ${isDayMode ? 'border-neutral-200' : 'border-ink-700/50'}`}>
+            <div className="font-mono text-[7.5px] leading-[1.7] text-neutral-500 space-y-0.5">
+              <div className="uppercase tracking-widest text-neutral-600">System</div>
+              <div className="flex items-center gap-1">
+                <span className={`w-1.5 h-1.5 rounded-full ${isStreaming ? 'bg-emerald-400 animate-pulse' : 'bg-neutral-600'}`} />
+                <span className={isStreaming ? 'text-emerald-400' : 'text-neutral-500'}>{isStreaming ? 'Streaming' : 'Paused'}</span>
+              </div>
+              <div className="text-neutral-600">v4.2.5-stable</div>
+              <div className="text-gold-500/80">{formatFrames(frameCount)}</div>
+              <div className="text-neutral-600">Frames</div>
+              <div className="pt-1 text-neutral-500">Up {formatUptime(uptimeSeconds)}</div>
+              <div className="pt-1 uppercase tracking-[0.15em] text-gold-600/70">by STATE</div>
+            </div>
+          </div>
+        </nav>
+
+        {/* ═══════════════ MAIN CONTENT ═══════════════ */}
+        <div className="flex-1 flex flex-col p-4 md:p-5 gap-4 overflow-hidden relative">
+
+          {/* PROJECTS MODAL */}
+          {projectsOpen && (
+            <div
+              className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+              data-testid="projects-modal"
+              onClick={() => setProjectsOpen(false)}
+            >
+              <div
+                className={`w-full max-w-md mx-4 rounded-xl border p-5 space-y-3 shadow-2xl ${isDayMode ? 'bg-[#fcfbf9] border-gold-500/40 text-neutral-900' : 'bg-ink-900 border-gold-500/30 text-white'}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[11px] font-extrabold tracking-[0.25em] text-gold-500 uppercase">Projects — Saved chains</span>
+                  <button onClick={() => setProjectsOpen(false)} className="font-mono text-[11px] text-neutral-500 hover:text-gold-500 cursor-pointer">[CLOSE]</button>
+                </div>
+                {savedChains().length === 0 ? (
+                  <p className={`font-mono text-[10px] leading-relaxed ${isDayMode ? 'text-neutral-500' : 'text-neutral-400'}`}>
+                    No saved chains yet. Build one in the Ai Lab (or by linking nodes on the
+                    brain graph) and save it as a preset — it will appear here.
+                  </p>
+                ) : (
+                  <ul className="space-y-2 mt-4 max-h-[60vh] overflow-y-auto pr-2">
+                    {savedChains().map((c) => (
+                      <li
+                        key={c.savedAt}
+                        className={`flex items-center justify-between p-3 rounded border cursor-pointer group ${isDayMode ? 'border-neutral-200 hover:border-gold-500 hover:bg-gold-500/5' : 'border-ink-700 hover:border-gold-500/50 hover:bg-gold-500/10'}`}
+                        onClick={() => { setChainPresetToOpen(c.name); setChainOpen(true); setProjectsOpen(false); }}
+                      >
+                        <div className="flex flex-col">
+                          <span className="font-bold text-sm tracking-wide">{c.name}</span>
+                          <span className="font-mono text-[9px] text-neutral-500">{new Date(c.savedAt).toLocaleString()} • {c.enabled.length} modules</span>
+                        </div>
+                        <div className={`p-1.5 rounded opacity-0 group-hover:opacity-100 transition-opacity ${isDayMode ? 'bg-neutral-200 text-neutral-700' : 'bg-ink-800 text-white'}`}>
+                          <Play className="w-3 h-3" />
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+
+          <PanelGroup direction="horizontal" autoSaveId="syntech-main-horiz" className="flex-1 flex gap-4 overflow-hidden">
+
+            {/* LEFT & CENTER COLUMN */}
+            <Panel defaultSize={74} minSize={30} className="flex flex-col overflow-hidden">
+              <PanelGroup direction="vertical" autoSaveId="syntech-main-vert" className="flex flex-col gap-4">
+
+                {/* TOP: Hero (brain graph / video) OR AI Lab OR Effect */}
+                <Panel defaultSize={62} minSize={20}>
+                  <div className={`w-full h-full relative rounded-2xl border ${isDayMode ? 'border-neutral-200 bg-white' : 'border-ink-700/60 bg-ink-900'} overflow-hidden flex flex-col shadow-lg`}>
+                    {chainOpen ? (
+                      <ChainLab
+                        isDayMode={isDayMode}
+                        onBack={() => setChainOpen(false)}
+                        initialChain={graphChain.length > 0 ? graphChain : undefined}
+                        initialPreset={chainPresetToOpen || undefined}
+                        initialSource={compSource}
+                        onSourcePicked={(file) => onSourceFile(file)}
+                      />
+                    ) : openEffectId ? (
+                      <EffectHost
+                        module={modules.find((m) => m.id === openEffectId) || currentModule}
+                        iframeSrc={EFFECTS_REGISTRY[openEffectId].iframeSrc!}
+                        isDayMode={isDayMode}
+                        onBack={handleEffectClose}
+                        onTelemetry={setEffectTelemetry}
+                        onParams={(params) => handleEffectParams(openEffectId, params)}
+                        onSendReady={(send) => { effectSendRef.current = send; }}
+                        onOpenAi={() => setIsAiDrawerOpen(true)}
+                      />
+                    ) : (
+                      <>
+                        {/* background: source video if chosen, else the brain graph */}
+                        {compSource ? (
+                          <video
+                            key={compSource.url}
+                            src={compSource.url}
+                            autoPlay
+                            muted
+                            loop
+                            playsInline
+                            data-testid="hero-video"
+                            className="absolute inset-0 w-full h-full object-cover"
+                          />
+                        ) : (
+                          <VfxCanvas
+                            modules={modules}
+                            activeModule={activeModule}
+                            setActiveModule={setActiveModule}
+                            onModuleOpen={handleModuleOpen}
+                            signalSource={signalSource}
+                            isDayMode={isDayMode}
+                            isStreaming={isStreaming}
+                            onChainLink={(from, to) => handleChainLink(from, to)}
+                            onChainOpen={openLab}
+                            onChainClear={clearChain}
+                            chain={graphChain}
+                          />
+                        )}
+
+                        {/* legibility gradient */}
+                        <div className="absolute inset-0 pointer-events-none bg-gradient-to-br from-black/70 via-black/25 to-transparent" />
+
+                        {/* wordmark + subtitle + actions */}
+                        <div className="absolute top-7 left-8 z-10 max-w-[70%]">
+                          <h1 className="font-display text-5xl md:text-6xl font-bold tracking-tighter text-white leading-[0.92] drop-shadow-2xl">VFX</h1>
+                          <h1 className="font-display text-5xl md:text-6xl font-bold tracking-tighter hero-gradient leading-[0.98] drop-shadow-2xl">SYNTECH</h1>
+                          <p className="mt-3 text-[11px] md:text-[13px] tracking-[0.18em] font-medium text-neutral-200/90 drop-shadow-md">
+                            AI-Powered. Node-Based. Limitless.
+                          </p>
+                          <div className="flex items-center gap-3 mt-5">
+                            <button
+                              type="button"
+                              data-testid="new-project"
+                              onClick={() => { setCompEffects([]); openLab(); }}
+                              className="px-4 py-2 rounded-lg bg-gold-500 text-black font-bold text-[12px] tracking-wide hover:bg-gold-400 transition-colors cursor-pointer shadow-lg"
+                            >
+                              New Project
+                            </button>
+                            <button
+                              type="button"
+                              data-testid="open-studio"
+                              onClick={openLab}
+                              className="px-4 py-2 rounded-lg border border-white/25 bg-black/30 backdrop-blur-sm text-white font-semibold text-[12px] tracking-wide hover:border-gold-500/60 hover:text-gold-300 transition-colors cursor-pointer"
+                            >
+                              Open Studio
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* active output card */}
+                        <div className={`absolute bottom-5 right-5 z-10 rounded-lg border px-4 py-3 backdrop-blur-md ${isDayMode ? 'bg-white/80 border-neutral-200' : 'bg-black/45 border-gold-500/25'}`}>
+                          <div className="font-mono text-[8px] uppercase tracking-[0.25em] text-gold-500/80">Active Output</div>
+                          <div className={`font-semibold text-sm mt-0.5 ${isDayMode ? 'text-neutral-900' : 'text-white'}`}>Main Composition</div>
+                          <div className="font-mono text-[9px] text-neutral-400 mt-0.5">{outputRes} · 60fps</div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </Panel>
+
+                <PanelResizeHandle className="h-3 flex items-center justify-center cursor-row-resize group relative z-10 shrink-0">
+                  <div className={`w-12 h-1.5 rounded-full transition-colors ${isDayMode ? 'bg-neutral-300 group-hover:bg-gold-500' : 'bg-ink-700 group-hover:bg-gold-500'}`} />
+                </PanelResizeHandle>
+
+                {/* BOTTOM: Nodal Composition + AI Director */}
+                <Panel defaultSize={38} minSize={15}>
+                  <PanelGroup direction="horizontal" autoSaveId="syntech-bottom-horiz" className="flex gap-4">
+                    <Panel defaultSize={55} minSize={20}>
+                      <NodalComposition
+                        isDayMode={isDayMode}
+                        effects={compEffects}
+                        source={compSource ? { name: compSource.name } : null}
+                        onToggleEffect={toggleCompEffect}
+                        onAddEffect={addCompEffect}
+                        onRemoveEffect={removeCompEffect}
+                        onOpenLab={openLab}
+                        onPickSource={pickSource}
+                      />
+                    </Panel>
+
+                    <PanelResizeHandle className="w-3 flex items-center justify-center cursor-col-resize group shrink-0">
+                      <div className={`w-1.5 h-12 rounded-full transition-colors ${isDayMode ? 'bg-neutral-300 group-hover:bg-gold-500' : 'bg-ink-700 group-hover:bg-gold-500'}`} />
+                    </PanelResizeHandle>
+
+                    <Panel defaultSize={45} minSize={20}>
+                      <div className={`w-full h-full rounded-2xl border ${isDayMode ? 'border-neutral-200 bg-white' : 'border-ink-700/60 bg-ink-900'} flex flex-col relative shadow-lg overflow-hidden`}>
+                        <AiDirector
+                          isDayMode={isDayMode}
+                          currentConfig={{
+                            activeModule,
+                            signalSource,
+                            bufferSize,
+                            parameters: modules.find((m) => m.id === activeModule)?.parameters || {},
+                          }}
+                          onApplyPreset={(preset) => effectSendRef.current?.({ type: 'syntech:preset:apply', payload: { params: preset } })}
+                        />
+                      </div>
+                    </Panel>
+                  </PanelGroup>
+                </Panel>
+
+              </PanelGroup>
+            </Panel>
+
+            <PanelResizeHandle className="w-3 flex items-center justify-center cursor-col-resize group shrink-0">
+              <div className={`w-1.5 h-12 rounded-full transition-colors ${isDayMode ? 'bg-neutral-300 group-hover:bg-gold-500' : 'bg-ink-700 group-hover:bg-gold-500'}`} />
+            </PanelResizeHandle>
+
+            {/* RIGHT SIDEBAR: Effects Library */}
+            <Panel defaultSize={26} minSize={16} maxSize={40}>
+              <div className={`w-full h-full rounded-2xl border flex flex-col overflow-hidden shadow-lg ${isDayMode ? 'border-neutral-200 bg-[#fbfaf7]' : 'border-ink-700/60 bg-ink-900'}`}>
+                <div className={`p-4 border-b flex items-center justify-between shrink-0 ${isDayMode ? 'border-neutral-200' : 'border-ink-700/50'}`}>
+                  <h2 className="font-mono text-[10px] tracking-[0.22em] text-gold-500 uppercase font-bold flex items-center gap-2">
+                    <Layers className="w-3 h-3" /> Effects Library
+                  </h2>
+                  <span className="text-[9px] font-mono text-neutral-500">83 Systems</span>
+                </div>
+
+                {/* Search box */}
+                <div className={`px-4 py-3 border-b shrink-0 ${isDayMode ? 'border-neutral-200' : 'border-ink-700/50'}`}>
+                  <div className={`w-full border rounded-lg p-2.5 flex items-center gap-2 ${isDayMode ? 'bg-black/5 border-neutral-200' : 'bg-black/40 border-ink-700/70'}`}>
+                    <Search className="w-3.5 h-3.5 text-neutral-500" />
+                    <span className="text-[10px] font-mono text-neutral-600">Search systems...</span>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-3.5 space-y-3 custom-scrollbar">
+                  {modules.map((module, idx) => {
+                    const active = activeModule === module.id;
+                    const meta = EFFECT_META[module.id];
+                    return (
+                      <div
+                        key={module.id}
+                        data-testid={`effect-card-${module.id}`}
+                        onClick={() => handleModuleOpen(module.id)}
+                        className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                          active
+                            ? isDayMode ? 'border-gold-500/50 bg-gold-500/5 shadow-md' : 'border-gold-500/45 bg-gold-500/[0.07] shadow-[0_0_15px_rgba(224,180,81,0.08)]'
+                            : isDayMode ? 'border-neutral-200 bg-white hover:border-gold-500/30' : 'border-ink-700/60 bg-ink-850 hover:border-gold-500/30'
+                        }`}
+                      >
+                        <div className="flex justify-between items-start mb-2.5">
+                          <span className="font-mono text-[8px] text-gold-500 uppercase tracking-widest">
+                            0{idx + 1} // {module.id.replace('_', ' ')}
+                          </span>
+                          <span
+                            onClick={(e) => toggleModuleStatus(module.id, e)}
+                            title="Toggle active / standby"
+                            className={`text-[8px] font-mono uppercase tracking-widest px-1.5 py-0.5 rounded cursor-pointer ${
+                              module.status === 'ACTIVE'
+                                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                                : 'bg-neutral-500/15 text-neutral-400 border border-neutral-500/25'
+                            }`}
+                          >
+                            {module.status === 'ACTIVE' ? 'Active' : 'Standby'}
+                          </span>
+                        </div>
+                        <div className="flex gap-3">
+                          <div className="w-12 h-12 shrink-0 rounded-md border border-white/5 overflow-hidden flex items-center justify-center" style={{ background: `linear-gradient(135deg, ${meta.color}30, ${meta.color}08)` }}>
+                            <span className="w-2 h-2 rounded-full" style={{ background: meta.color }} />
+                          </div>
+                          <div className="flex flex-col gap-1 min-w-0">
+                            <span className={`text-sm font-bold ${isDayMode ? 'text-neutral-900' : 'text-white'}`}>{module.name}</span>
+                            <p className={`text-[9px] leading-relaxed font-mono ${isDayMode ? 'text-neutral-500' : 'text-neutral-400'}`}>{module.description}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className={`p-3.5 border-t flex justify-center shrink-0 ${isDayMode ? 'border-neutral-200' : 'border-ink-700/50'}`}>
+                  <button
+                    onClick={openLab}
+                    className="text-[10px] font-mono tracking-widest text-neutral-400 hover:text-gold-500 transition-colors flex items-center gap-2 cursor-pointer"
+                  >
+                    Browse All Systems <ChevronRight className="w-3.5 h-3.5 text-gold-500" />
+                  </button>
+                </div>
+              </div>
+            </Panel>
+          </PanelGroup>
+        </div>
       </div>
     </div>
   );

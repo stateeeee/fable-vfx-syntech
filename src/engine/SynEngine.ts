@@ -180,9 +180,18 @@ export class SynEngine {
   };
 
   async loadVideoFile(file: File): Promise<void> {
+    return this.loadVideoUrl(URL.createObjectURL(file));
+  }
+
+  /**
+   * Load a video from a URL (typically an object URL owned by the shell so
+   * the same source can drive both the dashboard preview and this engine).
+   * The URL is NOT revoked here — its owner is responsible for that.
+   */
+  async loadVideoUrl(url: string): Promise<void> {
     this.stopSource();
     const v = document.createElement('video');
-    v.src = URL.createObjectURL(file);
+    v.src = url;
     v.loop = true;
     v.muted = true;
     v.playsInline = true;

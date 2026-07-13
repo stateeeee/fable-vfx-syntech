@@ -1,16 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Sparkles, 
-  X, 
-  Send, 
-  Bot, 
-  User, 
-  RefreshCw, 
-  Cpu, 
-  SlidersHorizontal,
+import {
+  Sparkles,
+  Send,
+  Bot,
+  RefreshCw,
+  Cpu,
   Lightbulb,
-  Workflow
+  ChevronRight,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 
@@ -33,34 +29,34 @@ interface AiDirectorProps {
   onApplyPreset: (preset: any) => void;
 }
 
-export default function AiDirector({
-  currentConfig,
-  onApplyPreset,
-  isDayMode,
-}: AiDirectorProps) {
+// module-specific default suggestion prompts (used before Gemini replies)
+const DEFAULT_SUGGESTIONS: Record<string, string[]> = {
+  blob_tracker: ['Increase Blob Tracker sensitivity', 'Add fluid dynamics turbulence', 'Boost cellular density glow'],
+  analog: ['Add Analog sync jitter', 'Warm the CRT phosphor bloom', 'Increase chromatic aberration'],
+  blob_reveal: ['Soften the reveal mask edges', 'Pulse the mask with the audio', 'Raise reveal threshold'],
+  bokeh: ['Enhance Bokeh depth falloff', 'Widen the aperture disks', 'Add anamorphic squeeze'],
+  anamorphic_lab: ['Stretch the horizontal flares', 'Add film halation glow', 'Increase diffraction streaks'],
+};
+
+export default function AiDirector({ currentConfig, onApplyPreset, isDayMode }: AiDirectorProps) {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 'welcome',
       role: 'model',
-      text: `Greetings, Operator. I am the **VFX Syntech AI Vault Oracle** embedded in your Obsidian Constellation Vault.
-
-I can help you analyze visual signals, suggest mathematical VFX parameters, or optimize the live matrix constellations. 
-
-Try selecting one of the analytical pathways below or write a custom query to begin.`,
+      text: `I've analyzed your composition. The audio shows strong low-mid frequencies that would benefit from enhanced depth mapping and organic distortion. Select a suggestion or write a custom directive to begin.`,
       timestamp: new Date(),
-    }
+    },
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [loadingText, setLoadingText] = useState('Consulting core index...');
+  const [showThread, setShowThread] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll chat to latest messages
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+    if (showThread) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading, showThread]);
 
-  // Cybernetic loading texts sequence
   useEffect(() => {
     if (!isLoading) return;
     const phrases = [
@@ -68,37 +64,22 @@ Try selecting one of the analytical pathways below or write a custom query to be
       'Decompressing node vectors...',
       'Synthesizing parameters...',
       'Consulting Gemini models...',
-      'Finalizing neural prediction...'
+      'Finalizing neural prediction...',
     ];
     let i = 0;
-    const interval = setInterval(() => {
-      i = (i + 1) % phrases.length;
-      setLoadingText(phrases[i]);
-    }, 1500);
+    const interval = setInterval(() => { i = (i + 1) % phrases.length; setLoadingText(phrases[i]); }, 1500);
     return () => clearInterval(interval);
   }, [isLoading]);
 
   const handleSendMessage = async (textToSend: string) => {
     if (!textToSend.trim() || isLoading) return;
-
-    const userMsg: Message = {
-      id: `msg_${Date.now()}`,
-      role: 'user',
-      text: textToSend,
-      timestamp: new Date()
-    };
-
+    const userMsg: Message = { id: `msg_${Date.now()}`, role: 'user', text: textToSend, timestamp: new Date() };
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setIsLoading(true);
 
     try {
-      // Map current React messages state to backend payload
-      const historyPayload = messages.map(m => ({
-        role: m.role,
-        text: m.text
-      }));
-
+      const historyPayload = messages.map((m) => ({ role: m.role, text: m.text }));
       const res = await fetch('/api/gemini/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -109,26 +90,19 @@ Try selecting one of the analytical pathways below or write a custom query to be
             activeModule: currentConfig.activeModule,
             signalSource: currentConfig.signalSource,
             bufferSize: currentConfig.bufferSize,
-            parameters: currentConfig.parameters
-          }
-        })
+            parameters: currentConfig.parameters,
+          },
+        }),
       });
-
       const data = await res.json();
-
       if (res.ok) {
-        const modelMsg: Message = {
-          id: `msg_${Date.now() + 1}`,
-          role: 'model',
-          text: data.reply,
-          timestamp: new Date(),
-          presetSuggested: data.preset
-        };
-        setMessages((prev) => [...prev, modelMsg]);
+        setMessages((prev) => [
+          ...prev,
+          { id: `msg_${Date.now() + 1}`, role: 'model', text: data.reply, timestamp: new Date(), presetSuggested: data.preset },
+        ]);
       } else {
         throw new Error(data.error || 'Server rejected request');
       }
-
     } catch (err: any) {
       console.error('AI chat error:', err);
       setMessages((prev) => [
@@ -136,189 +110,167 @@ Try selecting one of the analytical pathways below or write a custom query to be
         {
           id: `msg_err_${Date.now()}`,
           role: 'model',
-          text: `⚠️ **Neural Link Interruption**: Failed to complete server-side prompt proxy. Please ensure your \`GEMINI_API_KEY\` is configured in the secrets menu. \n\n*Error details: ${err.message || 'Unknown network failure'}*`,
-          timestamp: new Date()
-        }
+          text: `⚠️ **Neural Link Interruption**: Failed to complete server-side prompt proxy. Please ensure your \`GEMINI_API_KEY\` is configured. \n\n*Error: ${err.message || 'Unknown network failure'}*`,
+          timestamp: new Date(),
+        },
       ]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const triggerPresetAction = (presetName: string, prompt: string) => {
-    handleSendMessage(prompt);
+  const latestModel = [...messages].reverse().find((m) => m.role === 'model');
+  const latestPreset = latestModel?.presetSuggested;
+  const analysisText = (latestModel?.text || '').split('PRESET:')[0].trim();
+
+  // suggestion bullets: parameter-preset entries if Gemini returned any,
+  // otherwise the module's default creative directives
+  const presetSuggestions: string[] = latestPreset
+    ? Object.entries(latestPreset).map(([k, v]) => `Set ${k.replace(/([A-Z])/g, ' $1').trim()} → ${v}`)
+    : [];
+  const moduleSuggestions = DEFAULT_SUGGESTIONS[currentConfig.activeModule] || DEFAULT_SUGGESTIONS.blob_tracker;
+
+  const handleApplyAll = () => {
+    if (latestPreset) {
+      onApplyPreset(latestPreset);
+      return;
+    }
+    // no preset yet — ask Gemini to optimize the active module and apply it
+    handleSendMessage(
+      `Optimize the settings of the active module "${currentConfig.activeModule}" to maximize its visual density and output intensity. Generate preset.`
+    );
   };
 
+  const panelInk = isDayMode ? 'bg-[#fbfaf7]' : 'bg-ink-900';
+  const subInk = isDayMode ? 'text-neutral-500' : 'text-neutral-400';
+
   return (
-    <div className={`flex-1 flex flex-col h-full w-full ${isDayMode ? 'bg-[#fbfaf7]' : 'bg-[#050505]'} overflow-hidden`}>
-      {/* Header section with branding & active status */}
-      <div className={`px-4 py-4 border-b ${isDayMode ? 'border-neutral-200 bg-white' : 'border-gold-500/20 bg-black'} flex items-center justify-between`}>
-        <div className="flex items-center gap-3">
-          <div className="w-6 h-6 border border-gold-500/60 rotate-45 flex items-center justify-center shrink-0">
+    <div className={`flex-1 flex flex-col h-full w-full overflow-hidden ${panelInk}`}>
+      {/* Header */}
+      <div className={`px-4 py-3 border-b flex items-center justify-between shrink-0 ${isDayMode ? 'border-neutral-200 bg-white' : 'border-ink-700/50 bg-ink-950'}`}>
+        <div className="flex items-center gap-2.5">
+          <div className="w-6 h-6 border border-gold-500/60 rotate-45 flex items-center justify-center shrink-0 rounded-[6px] bg-gold-500/5">
             <Sparkles className="w-3 h-3 text-gold-500 -rotate-45" />
           </div>
+          <h2 className="text-[11px] tracking-[0.22em] font-mono text-gold-500 uppercase font-bold">AI Director</h2>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`text-[9px] font-mono ${isDayMode ? 'text-[#7b51b7]' : 'text-violet-400'}`}>Gemini AI</span>
+          <span className="flex items-center gap-1 text-[8px] font-mono uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active
+          </span>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto px-4 py-3.5 space-y-4 custom-scrollbar">
+        {/* Scene Analysis */}
+        <div>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Bot className="w-3 h-3 text-gold-500" />
+            <span className="font-mono text-[10px] font-bold tracking-widest uppercase text-gold-500">Scene Analysis</span>
+          </div>
+          <div className={`markdown-body font-mono text-[11px] leading-relaxed ${isDayMode ? 'text-neutral-700' : 'text-neutral-300'}`}>
+            {isLoading ? (
+              <span className="flex items-center gap-2 text-gold-500/80">
+                <RefreshCw className="w-3 h-3 animate-spin" /> {loadingText}
+              </span>
+            ) : (
+              <Markdown>{analysisText || 'Awaiting signal analysis…'}</Markdown>
+            )}
+          </div>
+        </div>
+
+        {/* Suggestions */}
+        <div>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Lightbulb className="w-3 h-3 text-violet-400" />
+            <span className={`font-mono text-[10px] font-bold tracking-widest uppercase ${isDayMode ? 'text-[#7b51b7]' : 'text-violet-400'}`}>Suggestions</span>
+          </div>
+          <ul className="space-y-1.5">
+            {(presetSuggestions.length ? presetSuggestions : moduleSuggestions).map((s, i) => (
+              <li key={i}>
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => (presetSuggestions.length ? handleApplyAll() : handleSendMessage(`${s} for the "${currentConfig.activeModule}" module. Generate preset.`))}
+                  className={`w-full flex items-start gap-2 text-left font-mono text-[10px] leading-snug px-2 py-1.5 rounded-md border transition-colors cursor-pointer disabled:opacity-40 ${
+                    isDayMode ? 'border-neutral-200 hover:border-gold-500/40 hover:bg-gold-500/5 text-neutral-700' : 'border-ink-700/60 hover:border-gold-500/40 hover:bg-gold-500/[0.06] text-neutral-300'
+                  }`}
+                >
+                  <ChevronRight className="w-3 h-3 text-gold-500 shrink-0 mt-[1px]" />
+                  <span>{s}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* full conversation (collapsed by default to keep the panel scannable) */}
+        {messages.length > 1 && (
           <div>
-            <h2 className={`text-[10px] tracking-[0.25em] font-mono ${isDayMode ? 'text-[#7b51b7]' : 'text-[#a882ff]'} uppercase font-bold`}>
-              AI DIRECTOR
-            </h2>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-gold-500 animate-pulse"></span>
-                    <span className={`text-[9px] font-mono ${isDayMode ? 'text-neutral-500' : 'text-neutral-400'}`}>ORACLE NODE v2.0 // GEMINI 3.5</span>
-                  </div>
-                </div>
-              </div>
-
-            </div>
-
-            {/* Config context info block */}
-            <div className={`px-6 py-3 ${isDayMode ? 'bg-[#fbfaf7]' : 'bg-[#0a0a0a]'} border-b ${isDayMode ? 'border-neutral-200' : 'border-gold-500/10'} flex justify-between items-center text-[9px] font-mono ${isDayMode ? 'text-neutral-500' : 'text-neutral-400'}`}>
-              <span>TARGET MODULE: <strong className="text-gold-500 uppercase">{currentConfig.activeModule}</strong></span>
-              <span>INPUT: <strong className="text-gold-500 uppercase">{currentConfig.signalSource}</strong></span>
-            </div>
-
-            {/* Scrollable multi-turn chat message thread */}
-            <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6 scrollbar-thin scrollbar-thumb-gold-950">
-              {messages.map((msg) => {
-                const isModel = msg.role === 'model';
-                return (
-                  <div 
-                    key={msg.id} 
-                    className={`flex gap-3.5 ${isModel ? 'justify-start' : 'justify-end'}`}
-                  >
-                    {isModel && (
-                      <div className="w-7 h-7 rounded bg-gold-950/40 border border-gold-500/30 flex items-center justify-center shrink-0 text-gold-500">
-                        <Bot className="w-4 h-4" />
-                      </div>
-                    )}
-
-                    <div className="max-w-[85%] space-y-2.5">
-                      <div className={`p-4 rounded border font-mono text-xs leading-relaxed ${
-                        isModel 
-                          ? (isDayMode ? 'bg-white border-neutral-200 text-neutral-800 shadow-sm' : 'bg-black/60 border-gold-500/15 text-neutral-300') 
-                          : (isDayMode ? 'bg-gold-500/10 border-gold-500/30 text-gold-800' : 'bg-gold-500/10 border-gold-500/35 text-gold-200')
-                      }`}>
-                        
-                        {/* Rendering response markdown content nicely wrapped */}
-                        <div className="markdown-body space-y-1.5">
-                          <Markdown>{msg.text.split('PRESET:')[0]}</Markdown>
-                        </div>
-
-                        {/* Apply Interactive Parameters Suggestions */}
-                        {isModel && msg.presetSuggested && (
-                          <div className={`mt-3.5 pt-3.5 ${isDayMode ? 'border-t border-neutral-200 space-y-2' : 'border-t border-gold-500/15 space-y-2'}`}>
-                            <div className={`flex items-center gap-1.5 text-[10px] ${isDayMode ? 'text-gold-600' : 'text-gold-400'} font-bold`}>
-                              <SlidersHorizontal className="w-3.5 h-3.5 text-gold-500" />
-                              NEURAL PARAMETER RECOMMENDED!
-                            </div>
-                            <p className={`text-[9px] ${isDayMode ? 'text-neutral-500' : 'text-neutral-400'} leading-tight`}>
-                              The AI has calculated a mathematical coordinate map for your current canvas. Apply directly?
-                            </p>
-                            <button
-                              onClick={() => onApplyPreset(msg.presetSuggested)}
-                              className="w-full mt-1 px-3 py-2 bg-gold-500 text-black font-extrabold text-[10px] tracking-wider uppercase rounded hover:bg-gold-400 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                            >
-                              <Cpu className="w-3.5 h-3.5" />
-                              APPLY PRESET TO SLIDERS
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className={`text-[8px] ${isDayMode ? 'text-neutral-400' : 'text-neutral-600'} font-mono px-1 ${!isModel ? 'text-right' : ''}`}>
-                        {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </div>
+            <button
+              type="button"
+              onClick={() => setShowThread((v) => !v)}
+              className={`font-mono text-[9px] uppercase tracking-widest ${subInk} hover:text-gold-500 cursor-pointer`}
+            >
+              {showThread ? '▾ Hide' : '▸ Show'} full transcript ({messages.length})
+            </button>
+            {showThread && (
+              <div className="mt-2 space-y-2.5">
+                {messages.map((msg) => (
+                  <div key={msg.id} className={`flex gap-2 ${msg.role === 'model' ? 'justify-start' : 'justify-end'}`}>
+                    <div className={`max-w-[88%] p-2.5 rounded-lg border font-mono text-[10px] leading-relaxed ${
+                      msg.role === 'model'
+                        ? (isDayMode ? 'bg-white border-neutral-200 text-neutral-700' : 'bg-black/40 border-ink-700/60 text-neutral-300')
+                        : (isDayMode ? 'bg-gold-500/10 border-gold-500/30 text-gold-800' : 'bg-gold-500/10 border-gold-500/30 text-gold-200')
+                    }`}>
+                      <div className="markdown-body"><Markdown>{msg.text.split('PRESET:')[0]}</Markdown></div>
                     </div>
-
-                    {!isModel && (
-                      <div className="w-7 h-7 rounded bg-gold-500/20 border border-gold-500/40 flex items-center justify-center shrink-0 text-gold-300">
-                        <User className="w-4 h-4" />
-                      </div>
-                    )}
                   </div>
-                );
-              })}
-
-              {isLoading && (
-                <div className="flex gap-3.5 justify-start">
-                  <div className="w-7 h-7 rounded bg-gold-950/40 border border-gold-500/30 flex items-center justify-center shrink-0 text-gold-500 animate-spin">
-                    <RefreshCw className="w-3.5 h-3.5" />
-                  </div>
-                  <div className={`p-4 rounded border ${isDayMode ? 'border-neutral-200' : 'border-gold-500/10'} bg-black/40 font-mono text-[10px] text-gold-500/70 flex items-center gap-2`}>
-                    <span className="w-1.5 h-1.5 rounded-full bg-gold-500 animate-ping"></span>
-                    <span>{loadingText}</span>
-                  </div>
-                </div>
-              )}
-
-              <div ref={chatEndRef} />
-            </div>
-
-            {/* Quick Presets Action Bar */}
-            <div className={`px-6 py-3 border-t ${isDayMode ? 'border-neutral-200 bg-[#f5f4f0]' : 'border-gold-500/10 bg-[#080808]'} space-y-2`}>
-              <div className="text-[9px] font-mono text-neutral-500 uppercase font-bold tracking-wider">
-                Select Analytical Vector
+                ))}
+                <div ref={chatEndRef} />
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                <button
-                  onClick={() => triggerPresetAction(
-                    'optimize',
-                    `Optimize the settings of the active module "${currentConfig.activeModule}" to maximize its visual density and output intensity. Generate preset.`
-                  )}
-                  disabled={isLoading}
-                  className={`px-2.5 py-1 rounded border border-gold-500/15 text-[10px] font-mono transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
-                    isDayMode 
-                      ? 'bg-[#e7e3da] text-gold-800 hover:bg-[#dad5ca] hover:text-gold-900 hover:border-gold-500/40' 
-                      : 'bg-[#111] text-gold-400 hover:text-white hover:border-gold-500/45'
-                  }`}
-                >
-                  <Lightbulb className="w-3 h-3 text-gold-500" />
-                  Optimize {currentConfig.activeModule.toUpperCase()}
-                </button>
+            )}
+          </div>
+        )}
+      </div>
 
-                <button
-                  onClick={() => triggerPresetAction(
-                    'constellation',
-                    `Explain how the active module "${currentConfig.activeModule}" maps to the Obsidian Constellation Nodes. Give me some insights on signal flow.`
-                  )}
-                  disabled={isLoading}
-                  className={`px-2.5 py-1 rounded border border-gold-500/15 text-[10px] font-mono transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
-                    isDayMode 
-                      ? 'bg-[#e7e3da] text-gold-800 hover:bg-[#dad5ca] hover:text-gold-900 hover:border-gold-500/40' 
-                      : 'bg-[#111] text-gold-400 hover:text-white hover:border-gold-500/45'
-                  }`}
-                >
-                  <Workflow className="w-3 h-3 text-gold-500" />
-                  Graph Constellation Map
-                </button>
-              </div>
-            </div>
+      {/* Apply All */}
+      <div className={`px-4 py-2.5 border-t shrink-0 ${isDayMode ? 'border-neutral-200 bg-[#f5f4f0]' : 'border-ink-700/50 bg-ink-950'}`}>
+        <button
+          type="button"
+          data-testid="apply-all"
+          onClick={handleApplyAll}
+          disabled={isLoading}
+          className="w-full px-3 py-2 bg-gold-500 text-black font-extrabold text-[10px] tracking-wider uppercase rounded-md hover:bg-gold-400 transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40"
+        >
+          <Cpu className="w-3.5 h-3.5" /> Apply All Suggestions
+        </button>
+      </div>
 
-            {/* Text Message Input Bar */}
-            <div className={`p-6 border-t ${isDayMode ? 'border-neutral-200 bg-white' : 'border-gold-500/20 bg-black'}`}>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleSendMessage(input);
-                }}
-                className="flex gap-2.5"
-              >
-                <input
-                  type="text"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Ask Gemini to optimize active nodes..."
-                  disabled={isLoading}
-                  className={`flex-1 ${isDayMode ? 'bg-white border border-neutral-300 px-4 shadow-inner' : 'bg-neutral-950 border border-gold-500/25 px-4'} py-2.5 rounded font-mono text-xs ${isDayMode ? 'text-neutral-900 focus:outline-none focus:border-gold-500/60 placeholder-neutral-400' : 'text-white focus:outline-none focus:border-gold-500/60 placeholder-neutral-600'} disabled:opacity-40`}
-                />
-                <button
-                  type="submit"
-                  disabled={!input.trim() || isLoading}
-                  className="px-4 bg-gold-500 text-black font-extrabold rounded flex items-center justify-center transition-colors hover:bg-gold-400 cursor-pointer disabled:opacity-30"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </form>
-            </div>
+      {/* Input bar (chat preserved) */}
+      <div className={`p-3 border-t shrink-0 ${isDayMode ? 'border-neutral-200 bg-white' : 'border-ink-700/50 bg-ink-950'}`}>
+        <form onSubmit={(e) => { e.preventDefault(); handleSendMessage(input); }} className="flex gap-2">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask Gemini to optimize active nodes..."
+            disabled={isLoading}
+            className={`flex-1 min-w-0 px-3 py-2 rounded-md font-mono text-[11px] transition-colors ${
+              isDayMode ? 'bg-white border border-neutral-300 text-neutral-900 focus:outline-none focus:border-gold-500/60 placeholder-neutral-400' : 'bg-black/40 border border-ink-700/70 text-white focus:outline-none focus:border-gold-500/60 placeholder-neutral-600'
+            } disabled:opacity-40`}
+          />
+          <button
+            type="submit"
+            disabled={!input.trim() || isLoading}
+            className="px-3 bg-gold-500 text-black font-extrabold rounded-md flex items-center justify-center transition-colors hover:bg-gold-400 cursor-pointer disabled:opacity-30"
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
